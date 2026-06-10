@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SBS – Connecting to QuickBooks...</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: #1a1f2e;
+      border: 1px solid #2d3548;
+      border-radius: 12px;
+      padding: 48px 56px;
+      max-width: 480px;
+      width: 90%;
+      text-align: center;
+    }
+
+    .logo {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 32px;
+    }
+
+    .spinner {
+      width: 48px;
+      height: 48px;
+      border: 3px solid #2d3548;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 28px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .spinner.done {
+      border-color: #22c55e;
+      border-top-color: #22c55e;
+      animation: none;
+    }
+
+    .spinner.error {
+      border-color: #ef4444;
+      border-top-color: #ef4444;
+      animation: none;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 10px;
+    }
+
+    p {
+      font-size: 14px;
+      color: #64748b;
+      line-height: 1.6;
+    }
+
+    .status-ok  { color: #22c55e; }
+    .status-err { color: #ef4444; }
+
+    .close-note {
+      margin-top: 24px;
+      font-size: 12px;
+      color: #475569;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">SBS Commission Tracker</div>
+    <div class="spinner" id="spinner"></div>
+    <h1 id="heading">Completing authorization…</h1>
+    <p id="message">Receiving credentials from QuickBooks Online.</p>
+    <p class="close-note" id="close-note"></p>
+  </div>
+
+  <script>
+    const spinner  = document.getElementById('spinner');
+    const heading  = document.getElementById('heading');
+    const message  = document.getElementById('message');
+    const closeNote = document.getElementById('close-note');
+
+    function setDone(msg) {
+      spinner.classList.add('done');
+      heading.textContent = 'Authorization complete';
+      heading.classList.add('status-ok');
+      message.textContent = msg;
+      closeNote.textContent = 'You can close this tab and return to the commission tracker.';
+    }
+
+    function setError(msg) {
+      spinner.classList.add('error');
+      heading.textContent = 'Authorization failed';
+      heading.classList.add('status-err');
+      message.textContent = msg;
+      closeNote.textContent = 'Close this tab and try connecting again from the commission tracker.';
+    }
+
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      const code       = params.get('code');
+      const state      = params.get('state');
+      const realmId    = params.get('realmId');
+      const error      = params.get('error');
+      const errorDesc  = params.get('error_description');
+
+      if (error) {
+        setError(errorDesc || error);
+        return;
+      }
+
+      if (!code) {
+        setError('No authorization code received. The request may have been cancelled or timed out.');
+        return;
+      }
+
+      // Validate state to prevent CSRF
+      const savedState = localStorage.getItem('qbo_oauth_state');
+      if (!savedState || savedState !== state) {
+        setError('State mismatch — this authorization response may not be valid. Please try again.');
+        return;
+      }
+
+      // Store everything the main app needs to complete the token exchange
+      localStorage.setItem('qbo_auth_code',  code);
+      localStorage.setItem('qbo_realm_id',   realmId || '');
+      localStorage.setItem('qbo_auth_ts',    Date.now().toString());
+      localStorage.removeItem('qbo_oauth_state');
+
+      setDone('QuickBooks authorization received. Returning to the commission tracker now.');
+
+      // If the main app is open in another tab, signal it
+      try {
+        localStorage.setItem('qbo_auth_signal', Date.now().toString());
+      } catch(e) {}
+
+      // Attempt to close this tab after a short delay
+      setTimeout(() => {
+        window.close();
+      }, 2500);
+    })();
+  </script>
+</body>
+</html>
