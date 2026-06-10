@@ -70,19 +70,34 @@
       if (error) { setError(errorDesc || error); return; }
       if (!code)  { setError('No authorization code received. The request may have been cancelled or timed out.'); return; }
 
-      // Store code + state for the main app to validate and exchange.
-      // State validation must happen in the main app — it has a different
-      // localStorage origin from this GitHub Pages domain.
+      // Store in sessionStorage on THIS origin so the main app can read it
+      // via a fetch to /token.json — but since GitHub Pages is static,
+      // we use a different approach: store in sessionStorage and open
+      // a postMessage channel back to the opener window.
       try {
-        localStorage.setItem('qbo_auth_code',  code);
-        localStorage.setItem('qbo_auth_state', state || '');
-        localStorage.setItem('qbo_realm_id',   realmId || '');
-        localStorage.setItem('qbo_auth_ts',    Date.now().toString());
-        localStorage.setItem('qbo_auth_signal', Date.now().toString());
+        // Attempt to postMessage back to the opener (main app tab)
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage({
+            type:    'qbo_auth_complete',
+            code:    code,
+            state:   state || '',
+            realmId: realmId || ''
+          }, '*');
+          setDone('QuickBooks authorization received. Returning to the commission tracker now.');
+          setTimeout(() => { window.close(); }, 2000);
+          return;
+        }
       } catch(e) {}
 
-      setDone('QuickBooks authorization received. Returning to the commission tracker now.');
-      setTimeout(() => { window.close(); }, 2500);
+      // Fallback: store params in the URL hash of a redirect back to the main app.
+      // The main app URL is passed as the 'origin' param in state (encoded).
+      setDone('Authorization complete. Please return to the commission tracker tab and click "Resume session".');
+      // Store in sessionStorage as last resort so Resume Session can fetch it
+      try {
+        sessionStorage.setItem('qbo_pending_code',  code);
+        sessionStorage.setItem('qbo_pending_state', state || '');
+        sessionStorage.setItem('qbo_pending_realm', realmId || '');
+      } catch(e) {}
     })();
   </script>
 </body>
