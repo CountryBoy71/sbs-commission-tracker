@@ -732,14 +732,15 @@ function isCommissionable(itemName) {
   return itemName && itemName.startsWith('Goods:');
 }
 
-// Extract line-level data from a single invoice (no totals — just the raw pieces)
+// Extract line-level data from a single invoice.
+// Commission is calculated per-line: qty × (unitPrice - installCost) × rate
+// Installation commission is only earned on lines where installCost > 0 AND NOT supplyOnly
 function extractInvoiceLines(inv) {
-  const soField = (inv.CustomField || []).find(f => f.Name === 'Sales Order');
-  const soId    = soField?.StringValue?.trim() || '';
+  const soField    = (inv.CustomField || []).find(f => f.Name === 'Sales Order');
+  const soId       = soField?.StringValue?.trim() || '';
   const hasSoField = !!(inv.CustomField || []).find(f => f.Name === 'Sales Order');
 
-  const itField = (inv.CustomField || []).find(f => f.Name === 'Install Type');
-  // Default to 'Install' if field is missing or blank
+  const itField     = (inv.CustomField || []).find(f => f.Name === 'Install Type');
   const installType = itField?.StringValue?.trim() || 'Install';
   const supplyOnly  = installType === 'Supply Only';
 
@@ -752,30 +753,48 @@ function extractInvoiceLines(inv) {
   const invoiceId = inv.Id;
   const docNum    = inv.DocNumber || '';
 
-  let goodsTotal   = 0;
-  let installTotal = 0;
-  const lines      = [];
+  // Per-line accumulators matching PBI logic exactly
+  let commEarned = 0;   // sum of qty × (unitPrice - installCost) × commRate per commissionable line
+  let instEarned = 0;   // sum of qty × (unitPrice - installCost) × instRate, only where installCost > 0
+  let goodsTotal = 0;   // gross goods amount (for display)
+  let installTotal = 0; // total install cost deducted (for display)
+  const lines = [];
 
   for (const line of (inv.Line || [])) {
     if (line.DetailType !== 'SalesItemLineDetail') continue;
     const itemRef = line.SalesItemLineDetail?.ItemRef;
     if (!itemRef) continue;
-    const itemName = itemRef.name || '';
-    const amt      = line.Amount || 0;
-    // HOLD and DISC are Finance: lines — excluded by the Goods: check below
-    if (isCommissionable(itemName)) {
-      const sku = itemName.split(':').pop();
-      const installCost = products[sku] ? parseFloat(products[sku]) : 0;
-      goodsTotal   += amt;
-      installTotal += installCost;
-      lines.push({ sku, itemName, amt, installCost });
+    const itemName  = itemRef.name || '';
+    if (!isCommissionable(itemName)) continue;
+
+    // HOLD and DISC are Finance: lines — excluded by isCommissionable above
+    const qty         = line.SalesItemLineDetail?.Qty || 1;
+    const unitPrice   = line.SalesItemLineDetail?.UnitPrice || (line.Amount / qty) || 0;
+    const sku         = itemName.split(':').pop();
+    const installCost = products[sku] ? parseFloat(products[sku]) : 0;
+    const amt         = line.Amount || 0;
+
+    const installDeduction = supplyOnly ? 0 : installCost;
+    const eligibleUnitPrice = unitPrice - installDeduction;
+
+    goodsTotal   += amt;
+    installTotal += supplyOnly ? 0 : installCost;
+    commEarned   += qty * eligibleUnitPrice * config.commRate;
+
+    // Richard earns only on lines with a mapped install cost, and never on Supply Only
+    if (installCost > 0 && !supplyOnly) {
+      instEarned += qty * eligibleUnitPrice * config.instRate;
     }
+
+    lines.push({ sku, itemName, qty, unitPrice, amt, installCost });
   }
+
+  const commBase = goodsTotal - installTotal;
 
   return {
     soId, hasSoField, invoiceId, docNum, customer, address, date,
     balance, total, supplyOnly, installType,
-    goodsTotal, installTotal, lines
+    goodsTotal, installTotal, commBase, commEarned, instEarned, lines
   };
 }
 
@@ -799,22 +818,28 @@ function getCommissionRows(role, filter) {
     if (!soMap[d.soId]) {
       // First invoice for this SO — seed the record
       soMap[d.soId] = {
-        soId:        d.soId,
-        customer:    d.customer,
-        address:     d.address,
-        date:        d.date,           // earliest invoice date
-        installType: d.installType,
-        supplyOnly:  d.supplyOnly,
-        goodsTotal:  0,
-        installTotal:0,
-        balance:     0,
-        lines:       []
+        soId:         d.soId,
+        customer:     d.customer,
+        address:      d.address,
+        date:         d.date,
+        installType:  d.installType,
+        supplyOnly:   d.supplyOnly,
+        goodsTotal:   0,
+        installTotal: 0,
+        commBase:     0,
+        commEarned:   0,
+        instEarned:   0,
+        balance:      0,
+        lines:        []
       };
     }
 
     const row = soMap[d.soId];
     row.goodsTotal   += d.goodsTotal;
     row.installTotal += d.installTotal;
+    row.commBase     += d.commBase;
+    row.commEarned   += d.commEarned;
+    row.instEarned   += d.instEarned;
     row.balance      += d.balance;
     row.lines         = row.lines.concat(d.lines);
     // Keep earliest date
@@ -826,13 +851,11 @@ function getCommissionRows(role, filter) {
   // Render missing-SO warning
   renderMissingSoWarning(missingSO);
 
-  // Compute commission totals and apply filter
+  // Apply filter — commEarned/instEarned already computed per-line in extractInvoiceLines
   const rows = [];
   for (const soId of Object.keys(soMap).sort()) {
     const r = soMap[soId];
-    const commBase   = r.goodsTotal - (r.supplyOnly ? 0 : r.installTotal);
-    const commEarned = commBase * config.commRate;
-    const instEarned = commBase * config.instRate;
+    const { commBase, commEarned, instEarned } = r;
 
     if (commEarned === 0 && instEarned === 0) continue;
 
