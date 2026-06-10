@@ -433,6 +433,9 @@
   <div class="section-label">Product / Install Cost Table</div>
   <div class="toolbar">
     <button class="btn sm" onclick="addProductRow()">+ Add Product</button>
+    <button class="btn sm" onclick="document.getElementById('productCsvFile').click()">Import CSV</button>
+    <input type="file" id="productCsvFile" accept=".csv" style="display:none" onchange="importProductCsv(event)">
+    <button class="btn sm" onclick="exportProductCsv()">Export CSV</button>
     <div class="toolbar-spacer"></div>
     <input class="search-input" placeholder="Filter SKUs…" oninput="renderProductTable(this.value)" id="productSearch" style="width:180px;">
   </div>
@@ -1248,6 +1251,45 @@ function deleteProduct(sku) {
   saveProducts();
   renderProductTable();
   renderAll();
+}
+
+function importProductCsv(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const lines = e.target.result.split('\n').map(l => l.trim()).filter(Boolean);
+    let imported = 0, skipped = 0;
+    for (const line of lines) {
+      // Support comma or tab delimited, strip quotes
+      const parts = line.split(/[,\t]/).map(p => p.replace(/^["']|["']$/g, '').trim());
+      if (parts.length < 2) { skipped++; continue; }
+      const sku  = parts[0].toUpperCase();
+      const cost = parseFloat(parts[1]);
+      if (!sku || isNaN(cost)) { skipped++; continue; }
+      // Skip header row
+      if (sku === 'SKU' || sku === 'CODE' || sku === 'PRODUCT') { skipped++; continue; }
+      products[sku] = cost;
+      imported++;
+    }
+    saveProducts();
+    renderProductTable();
+    renderAll();
+    alert(`Imported ${imported} products.${skipped > 0 ? ` ${skipped} rows skipped (invalid format).` : ''}`);
+  };
+  reader.readAsText(file);
+  evt.target.value = '';
+}
+
+function exportProductCsv() {
+  const skus = Object.keys(products).sort();
+  if (skus.length === 0) { alert('No products to export.'); return; }
+  const rows = ['SKU,Install Cost', ...skus.map(s => `${s},${products[s]}`)];
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'sbs_products.csv';
+  a.click();
 }
 
 // ═══════════════════════════════════════════════════
