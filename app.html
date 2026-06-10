@@ -446,13 +446,13 @@
 // ═══════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════
-const CLIENT_ID   = 'ABtwvpOkhMl094Q3vyept26sPKCbNzjxGbMk8V9C5JhSr5DaiF';
-const REALM_ID    = '9341456872578971';
-const REDIRECT_URI= 'https://countryboy71.github.io/sbs-oauth-redirect/';
-const QBO_BASE    = 'https://quickbooks.api.intuit.com/v3/company/' + REALM_ID;
-const AUTH_URL    = 'https://appcenter.intuit.com/connect/oauth2';
-const TOKEN_URL   = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
-const SCOPES      = 'com.intuit.quickbooks.accounting';
+const CLIENT_ID    = 'ABtwvpOkhMl094Q3vyept26sPKCbNzjxGbMk8V9C5JhSr5DaiF';
+const REALM_ID     = '9341456872578971';
+const REDIRECT_URI = window.location.origin + '/';   // Netlify site root = index.html
+const QBO_BASE     = 'https://quickbooks.api.intuit.com/v3/company/' + REALM_ID;
+const AUTH_URL     = 'https://appcenter.intuit.com/connect/oauth2';
+const TOKEN_FUNC   = '/.netlify/functions/token-exchange';  // Server-side proxy
+const SCOPES       = 'com.intuit.quickbooks.accounting';
 
 // ═══════════════════════════════════════════════════
 // STATE
@@ -482,9 +482,8 @@ window.onload = function() {
   loadLocalData();
   showTab('christa');
 
-  // Check if we just returned from OAuth callback with a pending code
+  // Load token from token.json (written by auth.py)
   checkForPendingAuth();
-  checkStoredToken();
 };
 
 function loadLocalData() {
@@ -554,59 +553,9 @@ async function startOAuth() {
     code_challenge:        challenge,
     code_challenge_method: 'S256'
   });
-  // Navigate the current tab — same origin on return so localStorage works
   window.location.href = AUTH_URL + '?' + params.toString();
 }
 
-async function completeOAuth() {
-  const code          = localStorage.getItem("qbo_auth_code");
-  const returnedState = localStorage.getItem("qbo_auth_state");
-  const savedState    = localStorage.getItem("qbo_oauth_state");
-  const verifier      = localStorage.getItem("qbo_code_verifier");
-  if (!code || !verifier) return;
-
-  // State validation happens here (same origin as startOAuth stored it)
-  if (savedState && returnedState && savedState !== returnedState) {
-    setConnStatus("error", "State mismatch — please try again");
-    ["qbo_auth_code","qbo_auth_state","qbo_oauth_state","qbo_code_verifier","qbo_auth_signal"].forEach(k => localStorage.removeItem(k));
-    openAuthModal();
-    return;
-  }
-
-  ["qbo_auth_code","qbo_auth_state","qbo_oauth_state","qbo_code_verifier","qbo_auth_signal"].forEach(k => localStorage.removeItem(k));
-
-
-  setConnStatus('loading', 'Exchanging token…');
-
-  try {
-    const resp = await fetch(TOKEN_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json'
-      },
-      body: new URLSearchParams({
-        grant_type:    'authorization_code',
-        code:          code,
-        redirect_uri:  REDIRECT_URI,
-        client_id:     CLIENT_ID,
-        code_verifier: verifier
-      })
-    });
-    const tok = await resp.json();
-    if (!tok.access_token) throw new Error(tok.error_description || 'Token exchange failed');
-
-    tok.expires_at = Date.now() + (tok.expires_in * 1000);
-    localStorage.setItem('sbs_qbo_token', JSON.stringify(tok));
-    closeAuthModal();
-    setConnStatus('connected', 'Connected to QBO');
-    document.getElementById('refreshBtn').disabled = false;
-    fetchInvoices();
-  } catch(e) {
-    setConnStatus('error', 'Auth failed — try again');
-    console.error(e);
-  }
-}
 
 // Called on load — picks up auth code that index.html stored in localStorage
 function checkForPendingAuth() {
@@ -616,44 +565,13 @@ function checkForPendingAuth() {
   const savState = localStorage.getItem('qbo_oauth_state');
   if (!code || !verifier) return;
 
-  // Clean up
   ['qbo_auth_code','qbo_auth_state','qbo_oauth_state','qbo_code_verifier'].forEach(k => localStorage.removeItem(k));
 
-  // State check
   if (savState && retState && savState !== retState) {
     setConnStatus('error', 'State mismatch — please try again');
-    return;
+    openAuthModal(); return;
   }
   exchangeCodeForToken(code, verifier);
-}
-
-async function exchangeCodeForToken(code, verifier) {
-  setConnStatus('loading', 'Exchanging token…');
-  try {
-    const resp = await fetch('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-      body: new URLSearchParams({
-        grant_type:    'authorization_code',
-        code:          code,
-        redirect_uri:  'https://countryboy71.github.io/sbs-oauth-redirect/',
-        client_id:     'ABtwvpOkhMl094Q3vyept26sPKCbNzjxGbMk8V9C5JhSr5DaiF',
-        code_verifier: verifier
-      })
-    });
-    const tok = await resp.json();
-    if (!tok.access_token) throw new Error(tok.error_description || JSON.stringify(tok));
-    tok.expires_at = Date.now() + (tok.expires_in * 1000);
-    localStorage.setItem('sbs_qbo_token', JSON.stringify(tok));
-    closeAuthModal();
-    setConnStatus('connected', 'Connected to QBO');
-    document.getElementById('refreshBtn').disabled = false;
-    fetchInvoices();
-  } catch(e) {
-    setConnStatus('error', 'Token exchange failed: ' + e.message);
-    console.error('exchangeCodeForToken error:', e);
-    openAuthModal();
-  }
 }
 
 function checkStoredToken() {
@@ -666,27 +584,44 @@ function checkStoredToken() {
     document.getElementById('refreshBtn').disabled = false;
     if (invoices.length === 0) fetchInvoices();
   } else if (tok.refresh_token) {
-    refreshToken(tok.refresh_token);
+    doRefreshToken(tok.refresh_token);
   } else {
     openAuthModal();
   }
 }
 
-async function refreshToken(refreshTok) {
+async function exchangeCodeForToken(code, verifier) {
+  setConnStatus('loading', 'Exchanging token…');
+  try {
+    const resp = await fetch(TOKEN_FUNC, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ grant_type: 'authorization_code', code, code_verifier: verifier })
+    });
+    const tok = await resp.json();
+    if (!tok.access_token) throw new Error(tok.error || 'Token exchange failed');
+    localStorage.setItem('sbs_qbo_token', JSON.stringify(tok));
+    closeAuthModal();
+    setConnStatus('connected', 'Connected to QBO');
+    document.getElementById('refreshBtn').disabled = false;
+    fetchInvoices();
+  } catch(e) {
+    setConnStatus('error', 'Auth failed — try again');
+    console.error('exchangeCodeForToken:', e);
+    openAuthModal();
+  }
+}
+
+async function doRefreshToken(refreshTok) {
   setConnStatus('loading', 'Refreshing token…');
   try {
-    const resp = await fetch(TOKEN_URL, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/x-www-form-urlencoded', 'Accept':'application/json' },
-      body: new URLSearchParams({
-        grant_type:    'refresh_token',
-        refresh_token: refreshTok,
-        client_id:     CLIENT_ID
-      })
+    const resp = await fetch(TOKEN_FUNC, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ grant_type: 'refresh_token', refresh_token: refreshTok })
     });
     const tok = await resp.json();
     if (!tok.access_token) throw new Error('Refresh failed');
-    tok.expires_at = Date.now() + (tok.expires_in * 1000);
     localStorage.setItem('sbs_qbo_token', JSON.stringify(tok));
     closeAuthModal();
     setConnStatus('connected', 'Connected to QBO');
