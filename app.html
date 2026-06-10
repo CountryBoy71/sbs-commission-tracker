@@ -451,7 +451,8 @@ const REALM_ID     = '9341456872578971';
 const REDIRECT_URI = window.location.origin + '/';   // Netlify site root = index.html
 const QBO_BASE     = 'https://quickbooks.api.intuit.com/v3/company/' + REALM_ID;
 const AUTH_URL     = 'https://appcenter.intuit.com/connect/oauth2';
-const TOKEN_FUNC   = '/.netlify/functions/token-exchange';  // Server-side proxy
+const TOKEN_FUNC   = '/.netlify/functions/token-exchange';  // Server-side token proxy
+const QBO_PROXY    = '/.netlify/functions/qbo-proxy';           // Server-side API proxy
 const SCOPES       = 'com.intuit.quickbooks.accounting';
 
 // ═══════════════════════════════════════════════════
@@ -643,12 +644,13 @@ function getToken() {
 async function qboFetch(path) {
   const tok = getToken();
   if (!tok) throw new Error('Not authenticated');
-  const resp = await fetch(QBO_BASE + path, {
-    headers: {
-      'Authorization': 'Bearer ' + tok.access_token,
-      'Accept': 'application/json'
-    }
+
+  const resp = await fetch(QBO_PROXY, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ path, access_token: tok.access_token })
   });
+
   if (resp.status === 401) { openAuthModal(); throw new Error('Token expired'); }
   return resp.json();
 }
