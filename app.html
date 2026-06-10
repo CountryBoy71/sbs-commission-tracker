@@ -469,6 +469,16 @@ let payModalCtx = null;
 // INIT
 // ═══════════════════════════════════════════════════
 window.onload = function() {
+  // Password gate — checked once per session
+  if (!sessionStorage.getItem('sbs_authed')) {
+    const pwd = prompt('SBS Commission Tracker — Enter password:');
+    if (pwd !== 'K0c@nus@2026^') {
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#64748b;background:#0d1117;">Access denied.</div>';
+      return;
+    }
+    sessionStorage.setItem('sbs_authed', '1');
+  }
+
   loadLocalData();
   showTab('christa');
 
