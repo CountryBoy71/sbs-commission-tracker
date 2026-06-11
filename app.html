@@ -288,6 +288,18 @@
   .ms-row .pay-field { flex:1; }
   .pay-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; }
 
+  /* filter select */
+  .filter-select {
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .filter-select:focus { outline:none; border-color:var(--accent); }
+
   /* search */
   .search-input {
     background:var(--surface2); border:1px solid var(--border2);
@@ -398,9 +410,21 @@
 <!-- CHRISTA PAGE -->
 <div class="page" id="page-christa">
   <div class="stats-row" id="christa-stats"></div>
-  <div class="toolbar">
+  <div class="toolbar" style="flex-wrap:wrap;gap:8px;">
     <input class="search-input" placeholder="Search orders…" oninput="renderChrista(this.value)" id="christaSearch">
+    <select class="filter-select" onchange="setFilter('christa','status',this.value)" id="flt-christa-status">
+      <option value="">All Statuses</option>
+      <option value="Unpaid">Unpaid</option>
+      <option value="Partial">Partial</option>
+      <option value="Paid">Paid</option>
+    </select>
+    <select class="filter-select" onchange="setFilter('christa','installType',this.value)" id="flt-christa-type">
+      <option value="">All Types</option>
+      <option value="Install">Install</option>
+      <option value="Supply Only">Supply Only</option>
+    </select>
     <div class="toolbar-spacer"></div>
+    <button class="btn sm" onclick="clearFilters('christa')">Clear Filters</button>
     <button class="btn sm" onclick="toggleShowHidden('christa')" id="showHiddenBtnChrista">Show Hidden</button>
   </div>
   <div class="table-wrap">
@@ -414,9 +438,21 @@
 <!-- RICHARD PAGE -->
 <div class="page" id="page-richard">
   <div class="stats-row" id="richard-stats"></div>
-  <div class="toolbar">
+  <div class="toolbar" style="flex-wrap:wrap;gap:8px;">
     <input class="search-input" placeholder="Search orders…" oninput="renderRichard(this.value)" id="richardSearch">
+    <select class="filter-select" onchange="setFilter('richard','status',this.value)" id="flt-richard-status">
+      <option value="">All Statuses</option>
+      <option value="Unpaid">Unpaid</option>
+      <option value="Partial">Partial</option>
+      <option value="Paid">Paid</option>
+    </select>
+    <select class="filter-select" onchange="setFilter('richard','installType',this.value)" id="flt-richard-type">
+      <option value="">All Types</option>
+      <option value="Install">Install</option>
+      <option value="Supply Only">Supply Only</option>
+    </select>
     <div class="toolbar-spacer"></div>
+    <button class="btn sm" onclick="clearFilters('richard')">Clear Filters</button>
     <button class="btn sm" onclick="toggleShowHidden('richard')" id="showHiddenBtnRichard">Show Hidden</button>
   </div>
   <div class="table-wrap">
@@ -501,6 +537,7 @@ let payModalCtx  = null;
 let hiddenOrders = {};   // soId → true
 let orderOverrides = {}; // soId → { lines: [{sku, qty, unitPrice}], supplyOnly: bool }
 let showHidden    = false;
+let tableFilters  = { christa: {}, richard: {}, orders: {} };
 
 // ═══════════════════════════════════════════════════
 // INIT
@@ -1014,7 +1051,8 @@ function renderAll() {
 // ═══════════════════════════════════════════════════
 function renderChrista(filter) {
   if (!filter) filter = document.getElementById('christaSearch')?.value || '';
-  const rows = getCommissionRows('sales', filter);
+  let rows = getCommissionRows('sales', filter);
+  rows = applyColumnFilters(rows, 'christa', 'sales');
   renderStatsRow('christa-stats', rows, 'christa', 'sales');
 
   const cols = [
@@ -1107,6 +1145,51 @@ function commissionRow(r, role) {
       <button class="btn sm" onclick="toggleHide('${r.soId}')" style="margin-left:4px;">${r.hidden?'Show':'Hide'}</button>
     </td>
   `;
+}
+
+// ═══════════════════════════════════════════════════
+// COLUMN FILTERS
+// ═══════════════════════════════════════════════════
+function setFilter(tab, key, value) {
+  if (value) {
+    tableFilters[tab][key] = value;
+  } else {
+    delete tableFilters[tab][key];
+  }
+  if (tab === 'christa') renderChrista();
+  else if (tab === 'richard') renderRichard();
+  else renderOrders();
+}
+
+function clearFilters(tab) {
+  tableFilters[tab] = {};
+  // Reset dropdowns
+  document.querySelectorAll(`[id^="flt-${tab}-"]`).forEach(el => el.value = '');
+  if (tab === 'christa') renderChrista();
+  else if (tab === 'richard') renderRichard();
+  else renderOrders();
+}
+
+function applyColumnFilters(rows, tab, role) {
+  const f = tableFilters[tab] || {};
+  if (Object.keys(f).length === 0) return rows;
+
+  return rows.filter(r => {
+    for (const [key, val] of Object.entries(f)) {
+      if (!val) continue;
+      if (key === 'status') {
+        const earned     = role === 'sales' ? r.commEarned : r.instEarned;
+        const ms         = getMilestoneData(r.soId, role, earned);
+        const actualPaid = ms.filter(m=>m.paid).reduce((s,m)=>s+m.amount,0);
+        const remaining  = earned - actualPaid;
+        const status     = actualPaid === 0 ? 'Unpaid' : remaining <= 0.01 ? 'Paid' : 'Partial';
+        if (status !== val) return false;
+      } else if (key === 'installType') {
+        if (r.installType !== val) return false;
+      }
+    }
+    return true;
+  });
 }
 
 function toggleShowHidden(tab) {
