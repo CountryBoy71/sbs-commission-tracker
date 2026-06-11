@@ -328,15 +328,43 @@
   </div>
 </div>
 
-<!-- PAYMENT EDIT MODAL -->
-<div class="modal-overlay" id="payModal">
-  <div class="pay-modal">
-    <h2 id="payModalTitle">Edit Payments</h2>
-    <div class="sub" id="payModalSub"></div>
-    <div id="payModalFields"></div>
-    <div class="pay-actions">
-      <button class="btn" onclick="closePayModal()">Cancel</button>
-      <button class="btn primary" onclick="savePayModal()">Save</button>
+<!-- COMBINED EDIT MODAL -->
+<div class="modal-overlay" id="editModal">
+  <div class="pay-modal" style="max-width:680px;max-height:90vh;overflow-y:auto;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div>
+        <h2 id="editModalTitle" style="font-size:16px;"></h2>
+        <div class="sub" id="editModalSub" style="font-size:12px;color:var(--muted);margin-top:2px;"></div>
+      </div>
+      <button class="btn sm" onclick="closeEditModal()">✕</button>
+    </div>
+    <!-- Tabs -->
+    <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px;">
+      <div id="etab-payments" onclick="switchEditTab('payments')"
+        style="padding:8px 16px;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid var(--accent);color:var(--accent);margin-bottom:-1px;">
+        Payments
+      </div>
+      <div id="etab-lines" onclick="switchEditTab('lines')"
+        style="padding:8px 16px;font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);margin-bottom:-1px;">
+        Order Lines
+      </div>
+    </div>
+    <!-- Payments tab -->
+    <div id="epanel-payments">
+      <div id="editPayFields"></div>
+    </div>
+    <!-- Lines tab -->
+    <div id="epanel-lines" style="display:none;">
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px;">
+        Edit quantities and unit prices below. Install costs are applied automatically from the product table.
+        <span id="ovr-source-note" style="color:var(--accent);"></span>
+      </p>
+      <div id="editLinesTable"></div>
+      <button class="btn sm" onclick="addOverrideLine()" style="margin-top:10px;">+ Add Line</button>
+    </div>
+    <div class="pay-actions" style="margin-top:20px;">
+      <button class="btn" onclick="closeEditModal()">Cancel</button>
+      <button class="btn primary" onclick="saveEditModal()">Save</button>
     </div>
   </div>
 </div>
@@ -373,6 +401,7 @@
   <div class="toolbar">
     <input class="search-input" placeholder="Search orders…" oninput="renderChrista(this.value)" id="christaSearch">
     <div class="toolbar-spacer"></div>
+    <button class="btn sm" onclick="toggleShowHidden('christa')" id="showHiddenBtnChrista">Show Hidden</button>
   </div>
   <div class="table-wrap">
     <div class="table-header">
@@ -388,6 +417,7 @@
   <div class="toolbar">
     <input class="search-input" placeholder="Search orders…" oninput="renderRichard(this.value)" id="richardSearch">
     <div class="toolbar-spacer"></div>
+    <button class="btn sm" onclick="toggleShowHidden('richard')" id="showHiddenBtnRichard">Show Hidden</button>
   </div>
   <div class="table-wrap">
     <div class="table-header">
@@ -467,7 +497,10 @@ let config   = { commRate: 0.10, instRate: 0.11 };
 let products = {};   // sku → installCost
 let payments = {};   // `${soId}_sales` or `${soId}_install` → {date1,date2,date3,amt1,amt2,amt3}
 let sortState = {};
-let payModalCtx = null;
+let payModalCtx  = null;
+let hiddenOrders = {};   // soId → true
+let orderOverrides = {}; // soId → { lines: [{sku, qty, unitPrice}], supplyOnly: bool }
+let showHidden    = false;
 
 // ═══════════════════════════════════════════════════
 // INIT
@@ -503,6 +536,10 @@ function loadLocalData() {
     if (inv) { invoices = JSON.parse(inv); buildItemsMap(); }
     const im = localStorage.getItem('sbs_items');
     if (im) itemsMap = JSON.parse(im);
+    const ho = localStorage.getItem('sbs_hidden');
+    if (ho) hiddenOrders = JSON.parse(ho);
+    const oo = localStorage.getItem('sbs_overrides');
+    if (oo) orderOverrides = JSON.parse(oo);
   } catch(e) { console.warn('loadLocalData error', e); }
   applyConfig();
   renderAll();
@@ -525,6 +562,12 @@ function saveProducts() {
 }
 function savePayments() {
   localStorage.setItem('sbs_payments', JSON.stringify(payments));
+}
+function saveHidden() {
+  localStorage.setItem('sbs_hidden', JSON.stringify(hiddenOrders));
+}
+function saveOverrides() {
+  localStorage.setItem('sbs_overrides', JSON.stringify(orderOverrides));
 }
 
 // ═══════════════════════════════════════════════════
@@ -732,6 +775,24 @@ function isCommissionable(itemName) {
   return itemName && itemName.startsWith('Goods:');
 }
 
+// Compute commission for a set of lines (used by both invoice and override paths)
+function computeLinesCommission(lines, supplyOnly) {
+  let commEarned = 0, instEarned = 0, goodsTotal = 0, installTotal = 0;
+  for (const line of lines) {
+    const installCost     = products[line.sku] ? parseFloat(products[line.sku]) : 0;
+    const installDeduct   = supplyOnly ? 0 : installCost;
+    const eligibleUnit    = line.unitPrice - installDeduct;
+    const amt             = line.qty * line.unitPrice;
+    goodsTotal   += amt;
+    installTotal += supplyOnly ? 0 : installCost;
+    commEarned   += line.qty * eligibleUnit * config.commRate;
+    if (installCost > 0 && !supplyOnly) {
+      instEarned += line.qty * eligibleUnit * config.instRate;
+    }
+  }
+  return { commEarned, instEarned, goodsTotal, installTotal, commBase: goodsTotal - installTotal };
+}
+
 // Extract line-level data from a single invoice.
 // Commission is calculated per-line: qty × (unitPrice - installCost) × rate
 // Installation commission is only earned on lines where installCost > 0 AND NOT supplyOnly
@@ -851,12 +912,30 @@ function getCommissionRows(role, filter) {
   // Render missing-SO warning
   renderMissingSoWarning(missingSO);
 
-  // Apply filter — commEarned/instEarned already computed per-line in extractInvoiceLines
+  // Apply overrides and filter
   const rows = [];
   for (const soId of Object.keys(soMap).sort()) {
-    const r = soMap[soId];
-    const { commBase, commEarned, instEarned } = r;
+    // Skip hidden orders unless showHidden toggle is on
+    if (hiddenOrders[soId] && !showHidden) continue;
 
+    const r = soMap[soId];
+
+    // Apply manual line override if present
+    const ov = orderOverrides[soId];
+    if (ov && ov.lines && ov.lines.length > 0) {
+      const ovSupplyOnly = ov.supplyOnly !== undefined ? ov.supplyOnly : r.supplyOnly;
+      const calc = computeLinesCommission(ov.lines, ovSupplyOnly);
+      r.goodsTotal   = calc.goodsTotal;
+      r.installTotal = calc.installTotal;
+      r.commBase     = calc.commBase;
+      r.commEarned   = calc.commEarned;
+      r.instEarned   = calc.instEarned;
+      r.supplyOnly   = ovSupplyOnly;
+      r.installType  = ovSupplyOnly ? 'Supply Only' : 'Install';
+      r.hasOverride  = true;
+    }
+
+    const { commBase, commEarned, instEarned } = r;
     if (commEarned === 0 && instEarned === 0) continue;
 
     if (filter) {
@@ -866,7 +945,7 @@ function getCommissionRows(role, filter) {
           !r.address.toLowerCase().includes(f)) continue;
     }
 
-    rows.push({ ...r, commBase, commEarned, instEarned });
+    rows.push({ ...r, commBase, commEarned, instEarned, hidden: !!hiddenOrders[soId] });
   }
   return rows;
 }
@@ -939,41 +1018,26 @@ function renderChrista(filter) {
   renderStatsRow('christa-stats', rows, 'christa', 'sales');
 
   const cols = [
-    { key:'soId',      label:'Sales Order' },
-    { key:'customer',  label:'Customer' },
-    { key:'address',   label:'Project Address' },
-    { key:'date',      label:'Invoice Date' },
-    { key:'commEarned',label:'Earned', numeric:true },
-    { key:'paid',      label:'Paid',   numeric:true },
-    { key:'remaining', label:'Remaining', numeric:true },
-    { key:'milestones',label:'Milestones' },
-    { key:'installType',label:'Type' },
-    { key:'actions',   label:'' }
+    { key:'soId',        label:'Sales Order',   width:'90px' },
+    { key:'customer',    label:'Customer',       width:'140px' },
+    { key:'address',     label:'Project',        width:'130px' },
+    { key:'installType', label:'Type',           width:'80px' },
+    { key:'commEarned',  label:'Earned',         numeric:true, width:'90px' },
+    { key:'pctReleased', label:'% Released',     numeric:true, width:'80px' },
+    { key:'payCount',    label:'Payments',       numeric:true, width:'70px' },
+    { key:'status',      label:'Status',         width:'75px' },
+    { key:'latestDate',  label:'Last Pay Date',  width:'95px' },
+    { key:'actualPaid',  label:'Actual Paid',    numeric:true, width:'90px' },
+    { key:'remaining',   label:'Remaining',      numeric:true, width:'90px' },
+    { key:'variance',    label:'Variance',       numeric:true, width:'80px' },
+    { key:'milestones',  label:'Milestones',     width:'200px' },
+    { key:'actions',     label:'',               width:'110px' }
   ];
 
   document.getElementById('christa-table').innerHTML =
     rows.length === 0
       ? emptyState(invoices.length === 0 ? 'No QBO data loaded' : 'No results', invoices.length === 0 ? 'Connect to QuickBooks and refresh data to get started.' : 'Try a different search term.')
-      : buildTable(cols, rows, 'christa', r => christaRow(r), 'christa');
-}
-
-function christaRow(r) {
-  const ms = getMilestoneData(r.soId, 'sales', r.commEarned);
-  const paid = ms.filter(m=>m.paid).reduce((s,m)=>s+m.amount,0);
-  const remaining = r.commEarned - paid;
-  const status = paid === 0 ? 'unpaid' : remaining <= 0.01 ? 'paid' : 'partial';
-  return `
-    <td class="mono">${r.soId}</td>
-    <td>${esc(r.customer)}</td>
-    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.address)}</td>
-    <td class="mono">${r.date}</td>
-    <td class="mono" style="text-align:right;">${fmt(r.commEarned)}</td>
-    <td class="mono" style="text-align:right;color:var(--green);">${fmt(paid)}</td>
-    <td class="mono" style="text-align:right;color:${remaining>0?'var(--yellow)':'var(--muted)'};">${fmt(remaining)}</td>
-    <td>${renderMilestones(ms)}</td>
-    <td><span class="pill ${r.supplyOnly?'supplyonly':'install'}">${r.installType}</span></td>
-    <td><button class="btn sm" onclick="openPayModal('${r.soId}','sales',${r.commEarned})">Edit</button></td>
-  `;
+      : buildTable(cols, rows, 'christa', r => commissionRow(r, 'sales'), 'christa');
 }
 
 // ═══════════════════════════════════════════════════
@@ -985,40 +1049,81 @@ function renderRichard(filter) {
   renderStatsRow('richard-stats', rows, 'richard', 'install');
 
   const cols = [
-    { key:'soId',      label:'Sales Order' },
-    { key:'customer',  label:'Customer' },
-    { key:'address',   label:'Project Address' },
-    { key:'date',      label:'Invoice Date' },
-    { key:'instEarned',label:'Earned', numeric:true },
-    { key:'paid',      label:'Paid',   numeric:true },
-    { key:'remaining', label:'Remaining', numeric:true },
-    { key:'milestones',label:'Milestones' },
-    { key:'installType',label:'Type' },
-    { key:'actions',   label:'' }
+    { key:'soId',        label:'Sales Order',   width:'90px' },
+    { key:'customer',    label:'Customer',       width:'140px' },
+    { key:'address',     label:'Project',        width:'130px' },
+    { key:'installType', label:'Type',           width:'80px' },
+    { key:'instEarned',  label:'Earned',         numeric:true, width:'90px' },
+    { key:'pctReleased', label:'% Released',     numeric:true, width:'80px' },
+    { key:'payCount',    label:'Payments',       numeric:true, width:'70px' },
+    { key:'status',      label:'Status',         width:'75px' },
+    { key:'latestDate',  label:'Last Pay Date',  width:'95px' },
+    { key:'actualPaid',  label:'Actual Paid',    numeric:true, width:'90px' },
+    { key:'remaining',   label:'Remaining',      numeric:true, width:'90px' },
+    { key:'variance',    label:'Variance',       numeric:true, width:'80px' },
+    { key:'milestones',  label:'Milestones',     width:'200px' },
+    { key:'actions',     label:'',               width:'110px' }
   ];
 
   document.getElementById('richard-table').innerHTML =
     rows.length === 0
       ? emptyState(invoices.length === 0 ? 'No QBO data loaded' : 'No results', invoices.length === 0 ? 'Connect to QuickBooks and refresh data to get started.' : 'Try a different search term.')
-      : buildTable(cols, rows, 'richard', r => richardRow(r), 'richard');
+      : buildTable(cols, rows, 'richard', r => commissionRow(r, 'install'), 'richard');
 }
 
-function richardRow(r) {
-  const ms = getMilestoneData(r.soId, 'install', r.instEarned);
-  const paid = ms.filter(m=>m.paid).reduce((s,m)=>s+m.amount,0);
-  const remaining = r.instEarned - paid;
+// Shared row renderer for Christa and Richard tabs
+function commissionRow(r, role) {
+  const earned  = role === 'sales' ? r.commEarned : r.instEarned;
+  const ms      = getMilestoneData(r.soId, role, earned);
+  const paidMs  = ms.filter(m => m.paid);
+  const actualPaid   = paidMs.reduce((s, m) => s + m.amount, 0);
+  const calcPaid     = paidMs.reduce((s, m) => s + m.calcAmt, 0);
+  const remaining    = earned - actualPaid;
+  const pctReleased  = earned > 0 ? (actualPaid / earned * 100) : 0;
+  const payCount     = paidMs.length;
+  const variance     = actualPaid - calcPaid;  // positive = overpaid, negative = underpaid
+  const latestDate   = paidMs.map(m => m.date).filter(Boolean).sort().pop() || '—';
+  const statusKey    = actualPaid === 0 ? 'unpaid' : remaining <= 0.01 ? 'paid' : 'partial';
+  const statusLabel  = actualPaid === 0 ? 'Unpaid' : remaining <= 0.01 ? 'Paid' : 'Partial';
+  const varColor     = Math.abs(variance) < 0.01 ? 'var(--muted)' : variance < 0 ? 'var(--red)' : 'var(--green)';
+  const ovBadge      = r.hasOverride ? '<span title="Manual override" style="font-size:9px;background:#1e3a5f;color:#60a5fa;border:1px solid #1d4ed844;border-radius:3px;padding:1px 4px;margin-left:4px;">OVR</span>' : '';
+
   return `
-    <td class="mono">${r.soId}</td>
-    <td>${esc(r.customer)}</td>
-    <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.address)}</td>
-    <td class="mono">${r.date}</td>
-    <td class="mono" style="text-align:right;">${fmt(r.instEarned)}</td>
-    <td class="mono" style="text-align:right;color:var(--green);">${fmt(paid)}</td>
-    <td class="mono" style="text-align:right;color:${remaining>0?'var(--yellow)':'var(--muted)'};">${fmt(remaining)}</td>
-    <td>${renderMilestones(ms)}</td>
+    <td class="mono" style="white-space:nowrap;">${r.soId}${ovBadge}</td>
+    <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.customer)}">${esc(r.customer)}</td>
+    <td style="max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.address)}">${esc(r.address)}</td>
     <td><span class="pill ${r.supplyOnly?'supplyonly':'install'}">${r.installType}</span></td>
-    <td><button class="btn sm" onclick="openPayModal('${r.soId}','install',${r.instEarned})">Edit</button></td>
+    <td class="mono" style="text-align:right;">${fmt(earned)}</td>
+    <td class="mono" style="text-align:right;color:var(--muted);">${pctReleased.toFixed(0)}%</td>
+    <td class="mono" style="text-align:right;color:var(--muted);">${payCount}/3</td>
+    <td><span class="pill ${statusKey}">${statusLabel}</span></td>
+    <td class="mono" style="text-align:right;color:var(--muted);">${latestDate}</td>
+    <td class="mono" style="text-align:right;color:var(--green);">${fmt(actualPaid)}</td>
+    <td class="mono" style="text-align:right;color:${remaining>0.01?'var(--yellow)':'var(--muted)'};">${fmt(remaining)}</td>
+    <td class="mono" style="text-align:right;color:${varColor};">${variance >= 0 ? '+' : ''}${fmt(variance)}</td>
+    <td>${renderMilestones(ms)}</td>
+    <td style="white-space:nowrap;">
+      <button class="btn sm" onclick="openEditModal('${r.soId}','${role}')">Edit</button>
+      <button class="btn sm" onclick="toggleHide('${r.soId}')" style="margin-left:4px;">${r.hidden?'Show':'Hide'}</button>
+    </td>
   `;
+}
+
+function toggleShowHidden(tab) {
+  showHidden = !showHidden;
+  const btn = document.getElementById('showHiddenBtn' + tab.charAt(0).toUpperCase() + tab.slice(1));
+  if (btn) btn.textContent = showHidden ? 'Hide Hidden' : 'Show Hidden';
+  renderAll();
+}
+
+function toggleHide(soId) {
+  if (hiddenOrders[soId]) {
+    delete hiddenOrders[soId];
+  } else {
+    hiddenOrders[soId] = true;
+  }
+  saveHidden();
+  renderAll();
 }
 
 // ═══════════════════════════════════════════════════
@@ -1126,8 +1231,9 @@ function buildTable(cols, rows, id, rowFn, colorClass) {
     const isSorted = ss.col === c.key;
     const arrow = c.key === 'actions' || c.key === 'milestones' ? '' :
       `<span class="sort-arrow">${isSorted ? (ss.dir===1?'▲':'▼') : '▲'}</span>`;
+    const wStyle = c.width ? `width:${c.width};min-width:${c.width};max-width:${c.width};` : '';
     return `<th class="${isSorted?'sorted':''}" onclick="tableSort('${id}','${c.key}')"
-      style="${c.numeric?'text-align:right':''}">${c.label}${arrow}</th>`;
+      style="${c.numeric?'text-align:right;':''}${wStyle}">${c.label}${arrow}</th>`;
   }).join('');
 
   const trs = sorted.map(r => `<tr>${rowFn(r)}</tr>`).join('');
@@ -1155,22 +1261,26 @@ function renderMilestones(ms) {
 }
 
 // ═══════════════════════════════════════════════════
-// PAYMENT MODAL
+// COMBINED EDIT MODAL
 // ═══════════════════════════════════════════════════
-function openPayModal(soId, role, earned) {
-  payModalCtx = { soId, role, earned: parseFloat(earned) };
-  const ms = getMilestones(role);
-  const key = getPaymentKey(soId, role);
-  const pay = payments[key] || {};
+let editModalLines = []; // working copy of lines being edited
+
+function openEditModal(soId, role) {
+  // Get the row data to find earned amount
+  const rows = getCommissionRows(role === 'sales' ? 'sales' : 'install', '');
+  const row  = rows.find(r => r.soId === soId);
+  const earned = row ? (role === 'sales' ? row.commEarned : row.instEarned) : 0;
+
+  payModalCtx = { soId, role, earned };
   const label = role === 'sales' ? 'Christa' : 'Richard';
 
-  document.getElementById('payModalTitle').textContent = `${soId} — ${label}`;
-  document.getElementById('payModalSub').textContent =
-    `Earned: ${fmtRaw(earned)} · Edit milestone dates and amounts below.`;
+  document.getElementById('editModalTitle').textContent = `${soId} — ${label}`;
+  document.getElementById('editModalSub').textContent = `Earned: ${fmt(earned)}`;
 
+  // Populate payments tab
+  const pay    = payments[getPaymentKey(soId, role)] || {};
   const msData = getMilestoneData(soId, role, earned);
-
-  document.getElementById('payModalFields').innerHTML = msData.map((m,i) => {
+  document.getElementById('editPayFields').innerHTML = msData.map((m,i) => {
     const n = i+1;
     return `
       <div class="ms-row">
@@ -1182,22 +1292,116 @@ function openPayModal(soId, role, earned) {
           <label>Amount Override (blank = ${fmtRaw(m.calcAmt)})</label>
           <input type="number" id="pm-amt${n}" placeholder="${fmtRaw(m.calcAmt)}" value="${pay[`amt${n}`]||''}">
         </div>
-      </div>
-    `;
+      </div>`;
   }).join('');
 
-  document.getElementById('payModal').classList.add('open');
+  // Populate lines tab — use override if exists, otherwise from invoice data
+  const ov = orderOverrides[soId];
+  if (ov && ov.lines && ov.lines.length > 0) {
+    editModalLines = ov.lines.map(l => ({...l}));
+    document.getElementById('ovr-source-note').textContent = ' Using manual override.';
+  } else if (row && row.lines && row.lines.length > 0) {
+    editModalLines = row.lines.map(l => ({ sku: l.sku, qty: l.qty, unitPrice: l.unitPrice }));
+    document.getElementById('ovr-source-note').textContent = ' Pre-populated from QBO invoices — edit to override.';
+  } else {
+    editModalLines = [];
+    document.getElementById('ovr-source-note').textContent = '';
+  }
+
+  // Also set supply only state
+  if (ov) document.getElementById('ovr-supply-only') && (document.getElementById('ovr-supply-only').checked = !!ov.supplyOnly);
+  renderEditLinesTable();
+  switchEditTab('payments');
+  document.getElementById('editModal').classList.add('open');
 }
 
-function closePayModal() {
-  document.getElementById('payModal').classList.remove('open');
+function switchEditTab(tab) {
+  document.getElementById('epanel-payments').style.display = tab === 'payments' ? '' : 'none';
+  document.getElementById('epanel-lines').style.display    = tab === 'lines'    ? '' : 'none';
+  const active   = 'border-bottom:2px solid var(--accent);color:var(--accent);margin-bottom:-1px;';
+  const inactive = 'border-bottom:2px solid transparent;color:var(--muted);margin-bottom:-1px;';
+  document.getElementById('etab-payments').style.cssText += tab === 'payments' ? active : inactive;
+  document.getElementById('etab-lines').style.cssText    += tab === 'lines'    ? active : inactive;
+  // simpler approach - just rebuild styles
+  document.getElementById('etab-payments').style.borderBottom = tab==='payments' ? '2px solid var(--accent)' : '2px solid transparent';
+  document.getElementById('etab-payments').style.color        = tab==='payments' ? 'var(--accent)' : 'var(--muted)';
+  document.getElementById('etab-lines').style.borderBottom    = tab==='lines'    ? '2px solid var(--accent)' : '2px solid transparent';
+  document.getElementById('etab-lines').style.color           = tab==='lines'    ? 'var(--accent)' : 'var(--muted)';
+}
+
+function renderEditLinesTable() {
+  const ov = orderOverrides[payModalCtx?.soId];
+  const supplyOnly = ov ? !!ov.supplyOnly : false;
+  const rows = editModalLines.map((l, i) => {
+    const installCost = products[l.sku] ? parseFloat(products[l.sku]) : 0;
+    const deduction   = supplyOnly ? 0 : installCost;
+    const commBase    = l.qty * (l.unitPrice - deduction);
+    return `<tr>
+      <td><input class="edit-input" value="${esc(l.sku)}" onchange="editModalLines[${i}].sku=this.value.toUpperCase();renderEditLinesTable();" style="width:90px;"></td>
+      <td><input class="edit-input" type="number" step="1" min="0" value="${l.qty}" onchange="editModalLines[${i}].qty=parseFloat(this.value)||0;" style="width:60px;"></td>
+      <td><input class="edit-input" type="number" step="0.01" min="0" value="${l.unitPrice}" onchange="editModalLines[${i}].unitPrice=parseFloat(this.value)||0;" style="width:90px;"></td>
+      <td class="mono" style="text-align:right;color:var(--muted);font-size:11px;">${fmt(installCost)}</td>
+      <td class="mono" style="text-align:right;font-size:11px;">${fmt(commBase)}</td>
+      <td><button class="btn sm" onclick="editModalLines.splice(${i},1);renderEditLinesTable();">✕</button></td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('editLinesTable').innerHTML = `
+    <table style="width:100%;">
+      <thead><tr>
+        <th style="text-align:left;font-size:11px;padding:6px 8px;color:var(--muted);">SKU</th>
+        <th style="text-align:left;font-size:11px;padding:6px 8px;color:var(--muted);">Qty</th>
+        <th style="text-align:left;font-size:11px;padding:6px 8px;color:var(--muted);">Unit Price</th>
+        <th style="text-align:right;font-size:11px;padding:6px 8px;color:var(--muted);">Install Cost</th>
+        <th style="text-align:right;font-size:11px;padding:6px 8px;color:var(--muted);">Comm. Base</th>
+        <th></th>
+      </tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:16px;">No lines yet</td></tr>'}</tbody>
+    </table>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+      <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="ovr-supply-only" ${supplyOnly?'checked':''} onchange="toggleOvrSupplyOnly(this.checked)">
+        Supply Only (no install deduction)
+      </label>
+      <div style="flex:1;"></div>
+      ${editModalLines.length > 0 ? `<button class="btn sm" style="color:var(--red);" onclick="clearOverride()">Clear Override</button>` : ''}
+    </div>`;
+}
+
+function toggleOvrSupplyOnly(val) {
+  const soId = payModalCtx?.soId;
+  if (!soId) return;
+  if (!orderOverrides[soId]) orderOverrides[soId] = { lines: editModalLines };
+  orderOverrides[soId].supplyOnly = val;
+  renderEditLinesTable();
+}
+
+function addOverrideLine() {
+  editModalLines.push({ sku: '', qty: 1, unitPrice: 0 });
+  renderEditLinesTable();
+  switchEditTab('lines');
+}
+
+function clearOverride() {
+  if (!confirm('Remove manual line override? QBO invoice lines will be used instead.')) return;
+  const soId = payModalCtx?.soId;
+  if (soId) { delete orderOverrides[soId]; saveOverrides(); }
+  editModalLines = [];
+  renderEditLinesTable();
+}
+
+function closeEditModal() {
+  document.getElementById('editModal').classList.remove('open');
   payModalCtx = null;
+  editModalLines = [];
 }
 
-function savePayModal() {
+function saveEditModal() {
   if (!payModalCtx) return;
   const { soId, role } = payModalCtx;
-  const key = getPaymentKey(soId, role);
+
+  // Save payments
+  const key   = getPaymentKey(soId, role);
   const entry = {};
   for (let n=1; n<=3; n++) {
     const d = document.getElementById(`pm-date${n}`)?.value;
@@ -1207,7 +1411,17 @@ function savePayModal() {
   }
   payments[key] = entry;
   savePayments();
-  closePayModal();
+
+  // Save line overrides if any lines exist
+  const soEl       = document.getElementById('ovr-supply-only');
+  const supplyOnly = soEl ? soEl.checked : false;
+  const validLines = editModalLines.filter(l => l.sku && l.qty > 0);
+  if (validLines.length > 0) {
+    orderOverrides[soId] = { lines: validLines, supplyOnly };
+    saveOverrides();
+  }
+
+  closeEditModal();
   renderAll();
 }
 
@@ -1320,9 +1534,9 @@ function exportProductCsv() {
 // ═══════════════════════════════════════════════════
 function exportAllData() {
   const bundle = {
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
-    config, products, payments
+    config, products, payments, hiddenOrders, orderOverrides
   };
   const blob = new Blob([JSON.stringify(bundle, null, 2)], { type:'application/json' });
   const a = document.createElement('a');
@@ -1338,9 +1552,11 @@ function importAllData(evt) {
   reader.onload = e => {
     try {
       const bundle = JSON.parse(e.target.result);
-      if (bundle.config)   { config   = bundle.config;   localStorage.setItem('sbs_config',   JSON.stringify(config)); }
-      if (bundle.products) { products = bundle.products; localStorage.setItem('sbs_products', JSON.stringify(products)); }
-      if (bundle.payments) { payments = bundle.payments; localStorage.setItem('sbs_payments', JSON.stringify(payments)); }
+      if (bundle.config)        { config        = bundle.config;        localStorage.setItem('sbs_config',    JSON.stringify(config)); }
+      if (bundle.products)      { products      = bundle.products;      localStorage.setItem('sbs_products',  JSON.stringify(products)); }
+      if (bundle.payments)      { payments      = bundle.payments;      localStorage.setItem('sbs_payments',  JSON.stringify(payments)); }
+      if (bundle.hiddenOrders)  { hiddenOrders  = bundle.hiddenOrders;  localStorage.setItem('sbs_hidden',    JSON.stringify(hiddenOrders)); }
+      if (bundle.orderOverrides){ orderOverrides= bundle.orderOverrides;localStorage.setItem('sbs_overrides', JSON.stringify(orderOverrides)); }
       applyConfig();
       renderAll();
       alert('Import successful.');
